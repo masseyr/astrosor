@@ -259,545 +259,348 @@ def propagate_tle(tle: TLE, jd: float) -> tuple[NDArray, NDArray]:
     return keplerian_to_eci(a_at_t, e, inc, raan_at_t, argp_at_t, nu)
 
 
-
-'''
-import sys
-import math
-from astropy.time import Time
-from datetime import datetime, timedelta
-from collections import OrderedDict
-
-MU = 398600.4
-SQRT_MU = 631.34888
-DAILY_SECONDS = 86400.0
-EARTH_RADIUS_KM = 6371.001
-DEFAULT_SIZE = 6.
-DEFAULT_RCS = 9.
-DEFAULT_RCS_SOURCE = 'UHF'
-SATCAT_LAUNCH_START = 56 # 1956 when launches started. Change if incorrect
-
-def format_as_bald_decimal_str(val:float,
-                               use_plus='+') \
-                               -> str:
-    _str = f"{abs(val):.8f}".removeprefix("0.")
-    sign = use_plus if val > 0 else "-"
-    return "".join([sign, ".", _str])
-
-def format_as_tle_exp_str(val:float,
-                          precision=8,
-                          length=8,
-                          use_plus=' ') \
-                          -> str:
-    mantissa_str, exponent_str = ("{:.{}e}".format(val, precision)).split('e')
-    exponent_sign = "+" if int(exponent_str) > 0 else "-"
-    sign = use_plus if val > 0 else "-"
-
-    exponent_str = str(abs(int(exponent_str)))
-    len_mantissa_str = length - len(sign) - len(exponent_str)
-    mantissa_str = mantissa_str.replace("e", "").replace(".", "")[:len_mantissa_str]
-
-    return "".join([sign, mantissa_str, exponent_sign, exponent_str])
-
-def mean_motion_to_semi_maj_axis(mean_motion):
-    if mean_motion != 0.0:
-        orbital_period = DAILY_SECONDS/mean_motion
-        return math.pow(orbital_period*SQRT_MU/(2.0*math.pi), (2.0/3.0))
-    return 0.0
-
-def semi_maj_axis_to_mean_motion(semi_maj_axis):
-    orbital_period = (2.0*math.pi)* math.sqrt((semi_maj_axis**3) / MU)
-    return DAILY_SECONDS/orbital_period
-
-def calc_checksum(tle_line_without_checksum:str):
-    checksum = 0
-    for char in tle_line_without_checksum:
-        if char.isdigit():
-            checksum += int(char)
-        elif char == "-":
-            checksum += 1
-    return checksum % 10
-
-def julian_date(year:int,
-                month:int,
-                day:int,
-                hour:float,
-                minute:float,
-                seconds:float):
-    #adapted from the C function of the same name in the NOVAS-C library
-    jd12h = day \
-        - 32075 \
-        + int(1461 * (year + 4800 + int((month - 14) / 12.0)) / 4.0) \
-        + int(367 * (month - 2 - int((month - 14) / 12.0) * 12.0) / 12.0) \
-        - int(3 * int(((year + 4800 + int((month - 14) / 12.0)) + 100.0) / 4.0))
-    return float(jd12h) - 0.5 + hour / 24.0 + minute / (24.0*60.0) + seconds / (24.0*3600.0)
-
-#this takes a modified time tuple of the form (year, month, day, hour, minute, second, fractional_second)
-def julian_date_from_datetime(datetime_obj:datetime,
-                               use_astropy:bool=True):
-    if use_astropy:
-        time = Time(datetime_obj)
-        return time.jd1 + time.jd2
-
-    return julian_date(year=datetime_obj.year,
-                       month=datetime_obj.month,
-                       day=datetime_obj.day,
-                       hour=datetime_obj.hour,
-                       minute=datetime_obj.minute,
-                       seconds=datetime_obj.second)
-
-
-class TLE:
-    """A class for reading/writing/manipulating NORAD Two Line Element Sets"""
-    def __init__(self,
-                 line1:str=None,
-                 line2:str=None,
-                 launched_only:bool=False,
-                 int_cat_num_only:bool=True,
-                 catalog_num:int=0,
-                 name:str='',
-                 country:str='ZZZ',
-                 site:str='UNKWN',
-                 classification:str="U",
-                 launch_year:int=-1,
-                 launch_num:int=1,
-                 launch_piece:str="AAA",
-                 launch_doy:int=1,
-                 epoch:datetime=None,
-                 inclination:float=0.0,
-                 raan:float=0.0,
-                 ecc:float=0.0,
-                 aop:float=0.0,
-                 mean_anomaly:float=0.0,
-                 mean_motion:float=1.0,
-                 rev_epoch:int=1,
-                 sma:float=0.0,
-                 period:float=0.0,
-                 apogee:float=0.0,
-                 perigee:float=0.0):
-        
-        self.name = name if name else ""
-        self.country = country
-        self.site = site
-        self.catalog_num = catalog_num
-        self.classification = classification
-
-        self.launch_year = launch_year
-        self.launch_num = launch_num
-        self.launch_piece = launch_piece
-        self.launch_doy = launch_doy
-
-        self.launch_year = -1
-        if self.launch_year > 0 and self.launch_year < 100:
-            self.launch_year_full = 2000+self.launch_year if \
-                self.launch_year <SATCAT_LAUNCH_START else 1900+self.launch_year
-        elif self.launch_year > 100:
-            self.launch_year_full = self.launch_year
-        
-        self.decay = None
-        self.epoch_year = 1
-        self.epoch_day = 1.0
-        self.mean_motion_derivative1 = 0.0
-        self.mean_motion_derivative2 = 0.0
-        self.bstar = 0.0
-        self.bstar_esign = '+'
-        self.elset_type = 0
-        self.element_set_num = 999
-
-        self.inclination = inclination
-        self.right_ascension_of_ascending_node = raan
-        self.eccentricity = ecc
-        self.argument_of_perigee = aop
-        self.mean_anomaly = mean_anomaly
-        self.mean_motion = mean_motion
-        self.revolution_num_at_epoch = rev_epoch
-
-        self.semi_maj_axis = sma
-        self.period = period
-        self.apogee = apogee
-        self.perigee = perigee
-
-        if self.semi_maj_axis > 0.0 and self.mean_motion == 0.0:
-            self.mean_motion = semi_maj_axis_to_mean_motion(self.semi_maj_axis)
-        elif self.semi_maj_axis == 0.0 and self.mean_motion > 0.0:
-            self.semi_maj_axis = mean_motion_to_semi_maj_axis(self.mean_motion)
-
-        if self.period == 0.0:
-            self.period = (24. * 60.)/self.mean_motion
-
-        if self.apogee == 0.0 and self.semi_maj_axis > 0:
-            self.apogee = (self.semi_maj_axis * (1 + self.eccentricity)) - EARTH_RADIUS_KM
-
-        if self.perigee == 0.0 and self.semi_maj_axis > 0:
-            self.perigee = (self.semi_maj_axis * (1 - self.eccentricity)) - EARTH_RADIUS_KM
-
-        self.epoch = epoch if epoch else datetime(self.epoch_year, 1, int(self.epoch_day))
-        #self.julian_date = 0.0 if not epoch else julian_date_from_datetime(epoch)
-
-        self.rcs_value = DEFAULT_RCS
-        self.rcs_source = DEFAULT_RCS_SOURCE
-
-        self.size_value = DEFAULT_SIZE
-        self.size_source = None
-        self.comment_value = None
-        self.comment_code = None
-        self.file = 0
-        self.current = 'y'
-
-        self.lines = []
-        try:
-            self.lines = self.to_lines()
-        except:
-            pass
-
-        self.line1 = '' if not self.lines else self.lines[0]
-        self.line2 = '' if not self.lines else self.lines[1]
-
-        self.parsed_tle = False
-
-        if (line1 is not None
-            and type(line1) in (str,)
-            and line2 is not None
-            and type(line2) in (str,)):
-
-            self.parse(line1,
-                       line2,
-                       launched_only=launched_only,
-                       int_cat_num_only=int_cat_num_only)
-
-    def parse(self,
-              line1:str,
-              line2:str,
-              launched_only=True,
-              int_cat_num_only=True):
-        """
-        Method to parse TLE line1 and line2
-        """
-
-        if self.check_tle(line1,
-                          line2,
-                          launched_only=launched_only,
-                          int_cat_num_only=int_cat_num_only):
-
-            self.line1 = line1.strip()
-            self.line2 = line2.strip()
-
-            self.catalog_num = int(line1[2:7].strip())
-            self._catalog_num_max = max(self.catalog_num, self._catalog_num_max)
-
-            if self.classification not in ('T', 'S', 'X', 'R'):
-                self.classification = line1[7]
-
-            self.launch_year = int(line1[9:11])
-            self.launch_year = 255
-            try:
-                self.launch_year = int(line1[9:11])
-            except:
-                pass
-
-            self.launch_year_full = 2000+self.launch_year if \
-                self.launch_year <SATCAT_LAUNCH_START else 1900+self.launch_year
-            
-            if (self.launch_year == 255
-                and line1[11:17].strip() == ''
-                or line1[11:17].strip() == '0'):
-                
-                #No launch information is present
-                self.launch_num = 0
-                self.launch_piece = 'ZZZ'
-            else:
-                self.launch_num = int(line1[11:14].strip())
-                self.launch_piece = line1[14:17].strip()
-
-            if self.launch_year >= 57:
-                self.launch_year += 1900
-            elif 0 <= self.launch_year <= 56:
-                self.launch_year += 2000
-
-            self.epoch_year = int(line1[18:20].strip())
-            self.epoch_day = float(line1[20:32].strip())
-
-            self.update_epoch(self.epoch_day,
-                              self.epoch_year)
-
-            self.julian_date = julian_date_from_datetime(self.epoch)
-
-            self.mean_motion_derivative1 = float(line1[33:43])
-
-            mean_motion_derivative2 = line1[44] + '.' + line1[45:50] + 'e' + line1[50:52]
-            #some TLEs don't put a sign for positive exponents in this parameter
-            if mean_motion_derivative2[-2] == ' ':
-                mean_motion_derivative2 = mean_motion_derivative2[: -2] + '+' + \
-                    mean_motion_derivative2[-1]
-            
-            self.mean_motion_derivative2 = float(mean_motion_derivative2)
-
-            bstar_exp_str = line1[59:61].strip()
-            if "-" in bstar_exp_str:
-                self.bstar_esign = "-"
-            elif "+" in bstar_exp_str:
-                self.bstar_esign = "+"
-
-            bstar_val = line1[54:59].strip()
-            if bstar_val:
-                self.bstar = float(line1[53] + '.' + bstar_val + 'e' +
-                                  str(int(bstar_exp_str)))
-            else:
-                self.bstar = 0.0
-
-            #Run into quite a few historical elsets that were missing the elset type
-            if line1[62].strip():
-                self.elset_type = int(line1[62].strip())
-            else:
-                self.elset_type = 0
-
-            self.element_set_num = int(line1[65:68])
-
-            self.inclination = float(line2[8:16])
-            self.right_ascension_of_ascending_node = float(line2[17:25])
-            self.eccentricity = float('.' + line2[26:33])
-            self.argument_of_perigee = float(line2[34:42])
-            self.mean_anomaly = float(line2[43:51])
-            self.mean_motion = float(line2[52:63])
-
-            if self.semi_maj_axis == 0.0:
-                self.semi_maj_axis = mean_motion_to_semi_maj_axis(self.mean_motion)
-            elif self.mean_motion == 0.0:
-                self.mean_motion = semi_maj_axis_to_mean_motion(self.semi_maj_axis)
-
-            if self.period == 0.0:
-                self.period = (24. * 60.)/self.mean_motion
-
-            self.apogee = (self.semi_maj_axis * (1 + self.eccentricity)) - EARTH_RADIUS_KM
-            
-            self.perigee = (self.semi_maj_axis * (1 - self.eccentricity)) - EARTH_RADIUS_KM
-
-            try:
-                self.revolution_num_at_epoch = float(line2[63:68])
-            except Exception as e:
-                sys.stdout.write(f"{{str(e)}}: Considering as 0\n")
-                self.revolution_num_at_epoch = 0.0
-            
-            self.parsed_tle = True
-
-    @property
-    def julian_date(self):
-        return julian_date_from_datetime(self.epoch)
-
-    def to_dict(self):
-        """Convert TLE class to dict"""
-        line1, line2 = self.to_lines()
-        
-        return OrderedDict({
-            "catalog_num": self.catalog_num,
-            "classification": self.classification,
-            "launch_year": self.launch_year,
-            "launch_num": self.launch_num,
-            "launch_piece": self.launch_piece,
-            "jdate": self.julian_date,
-            "epoch": self.epoch.strftime("%Y-%m-%d %H:%M:%S"),
-            "epoch_frac": self.epoch.microsecond,
-            "dmm": self.mean_motion_derivative1,
-            "dmmm": self.mean_motion_derivative2,
-            "bstar": self.bstar,
-            "bstar_esign": self.bstar_esign,
-            "type": self.elset_type,
-            "elem_num": self.element_set_num,
-            "i": self.inclination,
-            "raan": self.right_ascension_of_ascending_node,
-            "e": self.eccentricity,
-            "arg_per": self.argument_of_perigee,
-            "m_an": self.mean_anomaly,
-            "mean_motion": self.mean_motion,
-            "rev": self.revolution_num_at_epoch,
-            "line1": line1,
-            "line2": line2
-        })
-
-    def to_satcat(self):
-        
-        return OrderedDict({
-            "IntDes": f"{self.launch_year_full:4d}-{self.launch_num:03d}{self.launch_piece}",
-            "CatNum": self.catalog_num,
-            "SatName": self.name.upper() if len(self.name) <= 25 else self.name[:25].upper(),
-            "Country": self.country,
-            "Launch": (datetime(self.launch_year_full,1,1)+timedelta(days=self.launch_doy-1)).strftime("%Y-%m-%d"),
-            "Site": self.site.upper(),
-            "Decay": self.decay,
-            "Period": self.period,
-            "Inclination": self.inclination,
-            "Apogee": int(round(self.apogee)),
-            "Perigee": int(round(self.perigee)),
-            "Comment": self.comment_value,
-            "CommentCode": self.comment_code,
-            "RCSValue": self.rcs_value,
-            "RCSSource": self.rcs_source,
-            "File": self.file,
-            "launch_year": self.launch_year_full,
-            "launch_num": self.launch_num,
-            "launch_piece": self.launch_piece,
-            "current": self.current,
-            "size_est": self.size_value
-        })
-
-    def to_lines(self,
-                 name_line=False):
-        """
-        Returns tuple of (line1, line2)
-        """
-        
-        # Int designator
-        international_designator = f"{self.launch_year % 100:02}{self.launch_num:0>3d}{self.launch_piece:3s}"
-
-        # epoch
-        year = self.epoch.year % 100
-        day_of_year = self.epoch.timetuple().tm_yday
-        fractional_day = (self.epoch.hour * self.epoch.minute/60. + self.epoch.second/3600.
-                            + self.epoch.microsecond/1e6) / 24
-        epoch_str = f"{year:02d}{day_of_year:03d}.{int(fractional_day*1e8):08d}"[0:14]
-
-        # mean motion terms
-        mean_motion_derivative1_str = format_as_bald_decimal_str(self.mean_motion_derivative1)
-        mean_motion_derivative2_str = format_as_tle_exp_str(self.mean_motion_derivative2)
-        bstar_str = format_as_tle_exp_str(self.bstar)
-
-        line1 = f"1 {self.catalog_num:05d}{self.classification:1s}"+" "+\
-            f"{international_designator:<8}"+" "+\
-            f"{epoch_str}"+" "+\
-            f"{mean_motion_derivative1_str:10s}"+" "+\
-            f"{mean_motion_derivative2_str:8s}"+" "+\
-            f"{bstar_str:8s}"+" "+\
-            f"{self.elset_type:1d}"+" "+\
-            f"{self.element_set_num%1000:>4}"
-        
-        line1_checksum = calc_checksum(line1)
-        line1 += f"{line1_checksum:1d}"
-
-        # line 2
-        line2 = f"2 {self.catalog_num:05d}"+" "+\
-            f"{self.inclination:08.4f}"[:8]+" "+\
-            f"{self.right_ascension_of_ascending_node:08.4f}"[:8]+" "+\
-            f"{int(self.eccentricity*1e7):07d}"+" "+\
-            f"{self.argument_of_perigee:08.4f}"+" "+\
-            f"{self.mean_anomaly:08.4f}"+" "+\
-            f"{self.mean_motion:11.8f}"+\
-            f"{int(self.revolution_num_at_epoch) % 100000:05d}"
-
-        line2_checksum = calc_checksum(line2)
-        line2 += f"{line2_checksum:1d}"
-
-        if (name_line
-            and self.name
-            and type(self.name) in (str,)):
-            line0 = f"{self.name.upper()}"
-            return [line0, line1, line2]
-
-        return [line1, line2]
-
-    def __repr__(self):
-        return f"TLE({self.catalog_num}:{self.orbit_type()}){self.name}"
-
-    def orbit_type(self) -> str:
-        """
-        Returns obit type string: LEO, HEO, MEO or GEO
-        """
-        if self.period < 225:
-            return "LEO"
-        elif self.eccentricity >= 0.3:
-            return "HEO"
-        elif self.period < 800:
-            return "MEO"
+# ════════════════════════════════════════════════════════════════════════════
+#  TLE Checksum
+# ════════════════════════════════════════════════════════════════════════════
+
+def tle_checksum(line: str) -> int:
+    """Compute the modulo-10 checksum for a TLE line.
+
+    Each digit contributes its face value, '-' counts as 1,
+    all other characters count as 0.  The result is sum mod 10.
+
+    Parameters
+    ----------
+    line : str — a TLE line (characters 0..67; column 69 is the checksum)
+
+    Returns
+    -------
+    checksum : int — single digit 0-9
+    """
+    s = 0
+    for ch in line[:68]:
+        if ch.isdigit():
+            s += int(ch)
+        elif ch == '-':
+            s += 1
+    return s % 10
+
+
+def verify_checksum(line: str) -> bool:
+    """Verify the modulo-10 checksum of a TLE line.
+
+    Parameters
+    ----------
+    line : str — a complete TLE line (69 characters with checksum at column 69)
+
+    Returns
+    -------
+    valid : bool — True if the last digit matches the computed checksum
+    """
+    if len(line) < 69:
+        return False
+    expected = int(line[68])
+    return tle_checksum(line) == expected
+
+
+def verify_tle(line1: str, line2: str) -> dict:
+    """Verify checksums and basic structural validity of a TLE pair.
+
+    Parameters
+    ----------
+    line1, line2 : str — TLE lines 1 and 2
+
+    Returns
+    -------
+    dict with:
+        'valid' : bool — both lines pass all checks
+        'line1_checksum' : bool — line 1 checksum valid
+        'line2_checksum' : bool — line 2 checksum valid
+        'line1_prefix' : bool — line 1 starts with '1 '
+        'line2_prefix' : bool — line 2 starts with '2 '
+        'norad_match' : bool — NORAD IDs match between lines
+        'errors' : list[str]
+    """
+    errors = []
+
+    l1_pfx = line1.startswith("1 ")
+    l2_pfx = line2.startswith("2 ")
+    if not l1_pfx:
+        errors.append("line1 does not start with '1 '")
+    if not l2_pfx:
+        errors.append("line2 does not start with '2 '")
+
+    l1_ck = verify_checksum(line1)
+    l2_ck = verify_checksum(line2)
+    if not l1_ck:
+        errors.append(f"line1 checksum: expected {tle_checksum(line1)}, got {line1[68] if len(line1) >= 69 else '?'}")
+    if not l2_ck:
+        errors.append(f"line2 checksum: expected {tle_checksum(line2)}, got {line2[68] if len(line2) >= 69 else '?'}")
+
+    # NORAD ID match
+    try:
+        id1 = int(line1[2:7].strip())
+        id2 = int(line2[2:7].strip())
+        norad_ok = id1 == id2
+        if not norad_ok:
+            errors.append(f"NORAD ID mismatch: line1={id1}, line2={id2}")
+    except (ValueError, IndexError):
+        norad_ok = False
+        errors.append("could not parse NORAD IDs")
+
+    return {
+        "valid": l1_pfx and l2_pfx and l1_ck and l2_ck and norad_ok,
+        "line1_checksum": l1_ck,
+        "line2_checksum": l2_ck,
+        "line1_prefix": l1_pfx,
+        "line2_prefix": l2_pfx,
+        "norad_match": norad_ok,
+        "errors": errors,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TLE Export (Format to Strings)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _format_exp_field(value: float) -> str:
+    """Format a value in TLE's special exponent notation.
+
+    TLE format: ±NNNNN±E  where value = ±0.NNNNN × 10^±E
+    Example: 0.000123 → ' 12300-3'  (note: leading space or minus)
+             -0.00456 → '-45600-2'
+    """
+    if value == 0.0:
+        return " 00000-0"
+
+    sign = '-' if value < 0 else ' '
+    val = abs(value)
+
+    # Find exponent so that 0.1 <= mantissa < 1.0
+    exp = 0
+    mantissa = val
+    if mantissa != 0:
+        exp = int(np.floor(np.log10(mantissa))) + 1
+        mantissa = val / (10.0 ** exp)
+
+    # mantissa is now in [0.1, 1.0)
+    digits = f"{mantissa:.5f}"[2:7]  # 5 digits after '0.'
+
+    exp_sign = '+' if exp >= 0 else '-'
+    return f"{sign}{digits}{exp_sign}{abs(exp)}"
+
+
+def tle_to_lines(tle: TLE) -> tuple[str, str]:
+    """Export a TLE dataclass back to standard two-line element strings.
+
+    Produces properly formatted 69-character lines with valid checksums.
+
+    Parameters
+    ----------
+    tle : TLE — parsed or constructed TLE
+
+    Returns
+    -------
+    line1, line2 : str — TLE line 1 and line 2 (69 chars each)
+    """
+    # ── Epoch ──
+    yr_2d = tle.epoch_year % 100
+    epoch_str = f"{yr_2d:02d}{tle.epoch_day:012.8f}"
+
+    # ── ndot ──
+    # ndot is in rev/day², formatted as ±.NNNNNNNN (leading decimal assumed)
+    ndot_str = f"{tle.ndot:+011.8f}".replace("+", " ")
+    # TLE columns 34-43 (10 chars): " .NNNNNNNN" or "-.NNNNNNNN"
+    if tle.ndot >= 0:
+        ndot_field = f" {abs(tle.ndot):.8f}"[:10]
+    else:
+        ndot_field = f"{tle.ndot:.8f}"[:10]
+
+    # ── nddot and bstar: special exponent format ──
+    nddot_field = _format_exp_field(tle.nddot)
+    bstar_field = _format_exp_field(tle.bstar)
+
+    # ── International designator ──
+    intl = f"{tle.intl_designator:<8s}"
+
+    # ── Element set type (always 0 for SGP4) ──
+    etype = 0
+
+    # ── Element set number ──
+    elset = f"{tle.element_set:4d}"
+
+    # ── Build Line 1 (without checksum) ──
+    line1_body = (
+        f"1 {tle.norad_id:05d}{tle.classification} "
+        f"{intl} "
+        f"{epoch_str} "
+        f"{ndot_field} "
+        f"{nddot_field} "
+        f"{bstar_field} "
+        f"{etype}"
+        f"{elset}"
+    )
+    # Pad or trim to exactly 68 characters
+    line1_body = f"{line1_body:<68s}"[:68]
+    line1 = line1_body + str(tle_checksum(line1_body))
+
+    # ── Line 2 ──
+    inc_deg = np.rad2deg(tle.inclination) % 360
+    raan_deg = np.rad2deg(tle.raan) % 360
+    argp_deg = np.rad2deg(tle.argp) % 360
+    ma_deg = np.rad2deg(tle.mean_anomaly) % 360
+    ecc_str = f"{tle.eccentricity:.7f}"[2:]  # drop "0."
+    mm_rev_day = tle.mean_motion * 86400.0 / (2.0 * np.pi)
+    rev_num = tle.rev_number % 100000
+
+    line2_body = (
+        f"2 {tle.norad_id:05d} "
+        f"{inc_deg:8.4f} "
+        f"{raan_deg:8.4f} "
+        f"{ecc_str} "
+        f"{argp_deg:8.4f} "
+        f"{ma_deg:8.4f} "
+        f"{mm_rev_day:11.8f}"
+        f"{rev_num:5d}"
+    )
+    line2_body = f"{line2_body:<68s}"[:68]
+    line2 = line2_body + str(tle_checksum(line2_body))
+
+    return line1, line2
+
+
+def tle_to_string(tle: TLE, include_name: bool = True) -> str:
+    """Export a TLE to a complete multi-line string.
+
+    Parameters
+    ----------
+    tle : TLE
+    include_name : bool — if True, prepend the satellite name line
+
+    Returns
+    -------
+    text : str — 2 or 3 line TLE string
+    """
+    line1, line2 = tle_to_lines(tle)
+    if include_name and tle.name:
+        return f"{tle.name}\n{line1}\n{line2}"
+    return f"{line1}\n{line2}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TLE Epoch & Mean Anomaly Update
+# ════════════════════════════════════════════════════════════════════════════
+
+def _jd_to_epoch(jd: float) -> tuple[int, float]:
+    """Convert Julian Date to TLE epoch (year, fractional day-of-year)."""
+    # Julian Date → calendar date (Meeus algorithm)
+    z = int(jd + 0.5)
+    f = (jd + 0.5) - z
+    if z < 2299161:
+        a = z
+    else:
+        alpha = int((z - 1867216.25) / 36524.25)
+        a = z + 1 + alpha - alpha // 4
+    b = a + 1524
+    c = int((b - 122.1) / 365.25)
+    d = int(365.25 * c)
+    e = int((b - d) / 30.6001)
+
+    day = b - d - int(30.6001 * e) + f
+    month = e - 1 if e < 14 else e - 13
+    year = c - 4716 if month > 2 else c - 4715
+
+    # Day of year
+    # Jan 1 JD for this year
+    jd_jan1 = _epoch_to_jd(year, 1.0)
+    day_of_year = jd - jd_jan1 + 1.0
+
+    return int(year), float(day_of_year)
+
+
+def update_epoch(tle: TLE, new_jd: float, propagate: bool = True) -> TLE:
+    """Create a new TLE with an updated epoch and propagated mean anomaly.
+
+    Advances (or retards) the mean anomaly by the time difference
+    from the old epoch to the new epoch, applying J2 secular rates
+    on RAAN and argument of perigee and drag on mean motion.
+
+    The returned TLE is a new object; the original is not modified.
+
+    Parameters
+    ----------
+    tle : TLE — source TLE
+    new_jd : float — new epoch Julian Date
+    propagate : bool — if True, propagate mean anomaly, RAAN, argp,
+        and mean motion to the new epoch.  If False, only update
+        the epoch timestamp (mean anomaly unchanged).
+
+    Returns
+    -------
+    new_tle : TLE — updated copy
+    """
+    import copy
+    t = copy.deepcopy(tle)
+
+    new_year, new_day = _jd_to_epoch(new_jd)
+    t.epoch_year = new_year
+    t.epoch_day = new_day
+    t.epoch_jd = new_jd
+
+    if propagate:
+        dt = (new_jd - tle.epoch_jd) * 86400.0  # seconds
+
+        n = tle.mean_motion
+        e = tle.eccentricity
+        a = tle.semi_major_axis
+        p = a * (1.0 - e**2)
+
+        # J2 secular rates
+        cos_i = np.cos(tle.inclination)
+        sin_i = np.sin(tle.inclination)
+        factor = -1.5 * n * J2 * (R_EARTH / p) ** 2
+
+        raan_dot = factor * cos_i
+        argp_dot = factor * (2.0 - 2.5 * sin_i**2)
+
+        # Drag: ndot in rev/day²
+        n_dot_rad_s2 = tle.ndot * 2.0 * np.pi / 86400.0**2
+
+        # Update elements
+        t.raan = (tle.raan + raan_dot * dt) % (2.0 * np.pi)
+        t.argp = (tle.argp + argp_dot * dt) % (2.0 * np.pi)
+        t.mean_anomaly = (tle.mean_anomaly + n * dt
+                          + 0.5 * n_dot_rad_s2 * dt**2) % (2.0 * np.pi)
+
+        # Updated mean motion (drag)
+        t.mean_motion = n + n_dot_rad_s2 * dt
+        t.semi_major_axis = (MU_EARTH / t.mean_motion**2) ** (1.0 / 3.0)
+        t.period = compute_orbital_period(t.semi_major_axis)
+
+        # Advance rev number by approximate number of orbits
+        revs = abs(dt) / tle.period
+        if dt >= 0:
+            t.rev_number = tle.rev_number + int(revs)
         else:
-            return "GEO"
-        
-    def as_text(self):
-        return "\n".join(self.to_lines())
+            t.rev_number = max(0, tle.rev_number - int(revs))
 
-    def check_tle(self,
-                line1:str,
-                line2:str,
-                launched_only=True,
-                int_cat_num_only=True):
-        
-        # basic tests
-        if line1[0:2] != '1 ' or line2[0:2] != '2 ':
-            sys.stdout.write(f"TLE Line Numbers Incorrect: ({line1[0:1]}), ({line2[0:1]})\n")
-            raise RuntimeError("TLE Line Numbers incorrect")
-            # return False
+    return t
 
-        if len(line1) < 68 or len(line1) > 70 or len(line2) < 68 or len(line2) > 70:
-            sys.stdout.write(f"TLE Length Error: {str(len(line1))}, {str(len(line2))}\n")
-            return False
 
-        id1 = line1[2:7]
-        id2 = line2[2:7]
+def update_mean_anomaly(tle: TLE, new_mean_anomaly: float) -> TLE:
+    """Create a new TLE with a replaced mean anomaly (no propagation).
 
-        if id1 != id2:
-            sys.stdout.write(f"NORAD ID does not match on lines of TLE: {line1[2:7]}, {line2[2:7]}\n")
-            return False
+    Parameters
+    ----------
+    tle : TLE — source TLE
+    new_mean_anomaly : float — new mean anomaly [rad]
 
-        # try:
-        #     checksum = float(line2[63:68])
-        # except:
-        #     sys.stdout.write(f"Failed parsing TLE Rev Number from (line2[63:68])\n")
-        #     return False
+    Returns
+    -------
+    new_tle : TLE — copy with updated mean anomaly
+    """
+    import copy
+    t = copy.deepcopy(tle)
+    t.mean_anomaly = new_mean_anomaly % (2.0 * np.pi)
+    return t
 
-        # conditional tests
-        if int_cat_num_only and any(char.isalpha() for char in id1):
-            sys.stdout.write(f"Unrecognized NORAD ID: (line1[2:7])\n")
-            return False
-
-        if launched_only:
-            try:
-                int(line1[11:14].strip())
-            except:
-                sys.stdout.write(f"Failed parsing launch number for {id1}\n")
-                return False
-
-        return True
-
-    def update_epoch(self,
-                    julian_day:float=1.0,
-                    year:int=-1):
-        
-        if 0 < year < 100:
-            if SATCAT_LAUNCH_START < year < 99:
-                year += 1900
-            elif 0 <= year < SATCAT_LAUNCH_START:
-                year += 2000
-        
-        day = int(julian_day)
-        frac_hours = (julian_day - day)*24.0
-        hours = int(frac_hours)
-        frac_minutes = (frac_hours - hours)*60.0
-        minutes = int(frac_minutes)
-        frac_seconds = (frac_minutes - minutes)*60.0
-        seconds = int(frac_seconds)
-        microseconds = (frac_seconds - seconds)*1e6
-
-        self.epoch = datetime(year=year,
-                            month=1,
-                            day=1,
-                            hour=0,
-                            minute=0,
-                            second=0,
-                            microsecond=0) + \
-                    timedelta(days=day-1,
-                            hours=hours,
-                            minutes=minutes,
-                            seconds=seconds,
-                            microseconds=microseconds)
-
-if __name__ == "__main__":
-    now = datetime.now()
-    
-    print(julian_date_from_datetime(now, use_astropy=False))
-    print(julian_date_from_datetime(now, use_astropy=True))
-
-    a = TLE()
-    a.update_epoch(82.544,24)
-    print(a.epoch)
-    print(julian_date_from_datetime(a.epoch))
-    print(semi_maj_axis_to_mean_motion(42166.3))
-    print(a.as_text())
-
-'''

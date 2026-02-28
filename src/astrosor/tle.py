@@ -19,17 +19,64 @@ Reference
 Vallado, D.A. (2013). *Fundamentals of Astrodynamics*, 4th ed., §9.4.
 Hoots, F.R. & Roehrich, R.L. (1980). SPACETRACK Report No. 3.
 """
-
 import numpy as np
 from numpy.typing import NDArray
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 
-from .utils import MU_EARTH, R_EARTH, J2, OMEGA_EARTH
+
+from .utils import MU_EARTH, R_EARTH, J2, OMEGA_EARTH, DAILY_SECONDS, SQRT_MU
 from .orbits import (
     keplerian_to_eci, eci_to_keplerian,
     compute_mean_motion, compute_orbital_period,
     _solve_kepler,
 )
+
+
+
+def format_as_bald_decimal_str(val:float,
+                               use_plus='+') \
+                               -> str:
+    _str = f"{abs(val):.8f}".removeprefix("0.")
+    sign = use_plus if val > 0 else "-"
+    return "".join([sign, ".", _str])
+
+def format_as_tle_exp_str(val:float,
+                          precision=8,
+                          length=8,
+                          use_plus=' ') \
+                          -> str:
+    mantissa_str, exponent_str = ("{:.{}e}".format(val, precision)).split('e')
+    exponent_sign = "+" if int(exponent_str) > 0 else "-"
+    sign = use_plus if val > 0 else "-"
+
+    exponent_str = str(abs(int(exponent_str)))
+    len_mantissa_str = length - len(sign) - len(exponent_str)
+    mantissa_str = mantissa_str.replace("e", "").replace(".", "")[:len_mantissa_str]
+
+    return "".join([sign, mantissa_str, exponent_sign, exponent_str])
+
+
+def mean_motion_to_semi_maj_axis(mean_motion):
+    if mean_motion != 0.0:
+        orbital_period = DAILY_SECONDS/mean_motion
+        return np.pow(orbital_period*SQRT_MU/(2.0*np.pi), (2.0/3.0))
+    return 0.0
+
+def semi_maj_axis_to_mean_motion(semi_maj_axis):
+    orbital_period = (2.0*np.pi)* np.sqrt((semi_maj_axis**3) / (MU_EARTH / 1e9))
+    return DAILY_SECONDS/orbital_period
+
+
+def calc_checksum(tle_line_without_checksum:str):
+    checksum = 0
+    for char in tle_line_without_checksum:
+        if char.isdigit():
+            checksum += int(char)
+        elif char == "-":
+            checksum += 1
+    return checksum % 10
+
 
 
 @dataclass
@@ -64,20 +111,52 @@ class TLE:
     revisit_rate: float = 0.0   # desired revisit interval [s]
     catalog_id: str = ""        # user label
 
+    @property
+    def period(self):
+        """Full orbit period in minutes"""
+        return (24. * 60.)/self.mean_motion
+    
+    @property
+    def apogee(self):
+        if self.semi_major_axis > 0.:
+            return (self.semi_major_axis * (1 + self.eccentricity)) - (R_EARTH/1000.)
 
-def parse_tle(line0: str, line1: str, line2: str) -> TLE:
+    @property
+    def perigee(self):
+        if self.semi_major_axis > 0.:
+            return (self.semi_major_axis * (1 - self.eccentricity)) - (R_EARTH/1000.)
+
+    def orbit_type(self) -> str:
+        """
+        Returns obit type string: LEO, HEO, MEO or GEO
+        """
+        if self.period < 225:
+            return "LEO"
+        elif self.eccentricity >= 0.3:
+            return "HEO"
+        elif self.period < 800:
+            return "MEO"
+        else:
+            return "GEO"
+        
+
+def parse_tle(*lines) -> TLE:
     """Parse a three-line TLE (name + line 1 + line 2).
 
     Parameters
     ----------
-    line0 : str — satellite name line (may be empty)
-    line1 : str — TLE line 1
-    line2 : str — TLE line 2
+    lines: TLE lines
 
     Returns
     -------
     tle : TLE dataclass
     """
+    line0 = ''
+    if len(lines) == 3:
+        line0, line1, line2 = lines
+    elif len(lines) == 2:
+        line1, line2 = lines
+
     t = TLE()
     t.name = line0.strip()
 
@@ -174,15 +253,16 @@ def parse_tle_batch(text: str) -> list[TLE]:
     return tles
 
 
+
 def _epoch_to_jd(year: int, day_of_year: float) -> float:
     """Convert TLE epoch (year, fractional day) to Julian Date."""
     # Jan 1 of the epoch year
     a = (14 - 1) // 12
     y = year + 4800 - a
     m = 1 + 12 * a - 3
-    jd_jan1 = 1 + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
+    jd_jan1 = 1 + ((153 * m + 2) // 5) + 365 * y + (y // 4) - (y // 100) + (y // 400) - 32045
     jd_jan1 -= 0.5  # Julian Date convention (noon)
-    return jd_jan1 + day_of_year - 1.0
+    return jd_jan1 + day_of_year 
 
 
 def tle_epoch_state(tle: TLE) -> tuple[NDArray, NDArray]:
@@ -603,4 +683,3 @@ def update_mean_anomaly(tle: TLE, new_mean_anomaly: float) -> TLE:
     t = copy.deepcopy(tle)
     t.mean_anomaly = new_mean_anomaly % (2.0 * np.pi)
     return t
-

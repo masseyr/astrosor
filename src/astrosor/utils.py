@@ -11,12 +11,17 @@ from numpy.typing import NDArray
 
 # ── Physical Constants ──────────────────────────────────────────────────────
 MU_EARTH = 3.986004418e14       # Earth gravitational parameter  [m³/s²]
+SQRT_MU = 631.3481145928923     
 R_EARTH = 6_378_137.0           # WGS-84 semi-major axis          [m]
 F_EARTH = 1.0 / 298.257223563  # WGS-84 flattening
 E2_EARTH = 2 * F_EARTH - F_EARTH ** 2  # First eccentricity squared
 OMEGA_EARTH = 7.2921150e-5      # Earth rotation rate              [rad/s]
 J2 = 1.08263e-3                 # J2 zonal harmonic
 
+DAILY_SECONDS = 86400.0
+DEFAULT_SIZE = 6.
+DEFAULT_RCS = 9.
+DEFAULT_RCS_SOURCE = 'UHF'
 
 # ── Vector Helpers ──────────────────────────────────────────────────────────
 

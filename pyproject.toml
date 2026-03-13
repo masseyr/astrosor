@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astrosor"
+version = "4.0.0"
+description = "Space situational awareness: coordinate frames, TLE propagation, solar/lunar ephemeris, ground sensor models, and observation scheduling."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+sgp4 = [
+    "sgp4>=2.21",
+    "astropy>=6.0",
+]
+plot = [
+    "matplotlib>=3.8",
+]
+dev = [
+    "sgp4>=2.21",
+    "astropy>=6.0",
+    "matplotlib>=3.8",
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

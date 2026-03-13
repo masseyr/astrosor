@@ -19,64 +19,20 @@ Reference
 Vallado, D.A. (2013). *Fundamentals of Astrodynamics*, 4th ed., §9.4.
 Hoots, F.R. & Roehrich, R.L. (1980). SPACETRACK Report No. 3.
 """
+import copy
+
 import numpy as np
 from numpy.typing import NDArray
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-
-from .utils import MU_EARTH, R_EARTH, J2, OMEGA_EARTH, DAILY_SECONDS, SQRT_MU
+from .utils import MU_EARTH, R_EARTH, J2
 from .orbits import (
-    keplerian_to_eci, eci_to_keplerian,
-    compute_mean_motion, compute_orbital_period,
+    keplerian_to_eci,
     _solve_kepler,
 )
 
-
-
-def format_as_bald_decimal_str(val:float,
-                               use_plus='+') \
-                               -> str:
-    _str = f"{abs(val):.8f}".removeprefix("0.")
-    sign = use_plus if val > 0 else "-"
-    return "".join([sign, ".", _str])
-
-def format_as_tle_exp_str(val:float,
-                          precision=8,
-                          length=8,
-                          use_plus=' ') \
-                          -> str:
-    mantissa_str, exponent_str = ("{:.{}e}".format(val, precision)).split('e')
-    exponent_sign = "+" if int(exponent_str) > 0 else "-"
-    sign = use_plus if val > 0 else "-"
-
-    exponent_str = str(abs(int(exponent_str)))
-    len_mantissa_str = length - len(sign) - len(exponent_str)
-    mantissa_str = mantissa_str.replace("e", "").replace(".", "")[:len_mantissa_str]
-
-    return "".join([sign, mantissa_str, exponent_sign, exponent_str])
-
-
-def mean_motion_to_semi_maj_axis(mean_motion):
-    if mean_motion != 0.0:
-        orbital_period = DAILY_SECONDS/mean_motion
-        return np.pow(orbital_period*SQRT_MU/(2.0*np.pi), (2.0/3.0))
-    return 0.0
-
-def semi_maj_axis_to_mean_motion(semi_maj_axis):
-    orbital_period = (2.0*np.pi)* np.sqrt((semi_maj_axis**3) / (MU_EARTH / 1e9))
-    return DAILY_SECONDS/orbital_period
-
-
-def calc_checksum(tle_line_without_checksum:str):
-    checksum = 0
-    for char in tle_line_without_checksum:
-        if char.isdigit():
-            checksum += int(char)
-        elif char == "-":
-            checksum += 1
-    return checksum % 10
-
+_TWO_PI = 2.0 * np.pi
+_REV_DAY_TO_RAD_S = _TWO_PI / 86400.0   # rev/day → rad/s
 
 
 @dataclass
@@ -98,13 +54,12 @@ class TLE:
     eccentricity: float = 0.0
     argp: float = 0.0           # [rad]
     mean_anomaly: float = 0.0   # [rad]
-    mean_motion: float = 0.0    # [rad/s]
+    mean_motion: float = 0.0    # [rev/day]
     rev_number: int = 0
 
     # ── Derived quantities (computed on parse) ──
     epoch_jd: float = 0.0       # Julian Date of TLE epoch
     semi_major_axis: float = 0.0  # [m]
-    period: float = 0.0         # [s]
 
     # ── User-assigned metadata ──
     priority: int = 5           # scheduling priority (1=highest, 10=lowest)
@@ -112,24 +67,23 @@ class TLE:
     catalog_id: str = ""        # user label
 
     @property
-    def period(self):
-        """Full orbit period in minutes"""
-        return (24. * 60.)/self.mean_motion
-    
-    @property
-    def apogee(self):
-        if self.semi_major_axis > 0.:
-            return (self.semi_major_axis * (1 + self.eccentricity)) - (R_EARTH/1000.)
+    def period(self) -> float:
+        """Full orbit period [min]."""
+        return 1440.0 / self.mean_motion
 
     @property
-    def perigee(self):
-        if self.semi_major_axis > 0.:
-            return (self.semi_major_axis * (1 - self.eccentricity)) - (R_EARTH/1000.)
+    def apogee(self) -> float | None:
+        if self.semi_major_axis > 0.0:
+            return (self.semi_major_axis * (1 + self.eccentricity)) - (R_EARTH / 1000.0)
 
+    @property
+    def perigee(self) -> float | None:
+        if self.semi_major_axis > 0.0:
+            return (self.semi_major_axis * (1 - self.eccentricity)) - (R_EARTH / 1000.0)
+
+    @property
     def orbit_type(self) -> str:
-        """
-        Returns obit type string: LEO, HEO, MEO or GEO
-        """
+        """Returns orbit type string: LEO, HEO, MEO or GEO."""
         if self.period < 225:
             return "LEO"
         elif self.eccentricity >= 0.3:
@@ -138,7 +92,7 @@ class TLE:
             return "MEO"
         else:
             return "GEO"
-        
+
 
 def parse_tle(*lines) -> TLE:
     """Parse a three-line TLE (name + line 1 + line 2).
@@ -165,12 +119,10 @@ def parse_tle(*lines) -> TLE:
     t.classification = line1[7]
     t.intl_designator = line1[9:17].strip()
 
-    # Epoch
     yr = int(line1[18:20].strip())
     t.epoch_year = yr + (1900 if yr >= 57 else 2000)
     t.epoch_day = float(line1[20:32].strip())
 
-    # Mean motion derivatives
     t.ndot = float(line1[33:43].strip())
 
     # nddot: special format (leading decimal assumed, exponent)
@@ -208,16 +160,13 @@ def parse_tle(*lines) -> TLE:
     t.eccentricity = float("0." + line2[26:33].strip())
     t.argp = np.deg2rad(float(line2[34:42].strip()))
     t.mean_anomaly = np.deg2rad(float(line2[43:51].strip()))
-
-    # Mean motion [rev/day] → [rad/s]
-    mm_rev_day = float(line2[52:63].strip())
-    t.mean_motion = mm_rev_day * 2.0 * np.pi / 86400.0
+    t.mean_motion = float(line2[52:63].strip())  # [rev/day]
 
     t.rev_number = int(line2[63:68].strip()) if line2[63:68].strip() else 0
 
     # ── Derived quantities ──
-    t.semi_major_axis = (MU_EARTH / t.mean_motion**2) ** (1.0 / 3.0)
-    t.period = compute_orbital_period(t.semi_major_axis)
+    n_rad_s = t.mean_motion * _REV_DAY_TO_RAD_S
+    t.semi_major_axis = (MU_EARTH / n_rad_s**2) ** (1.0 / 3.0)
     t.epoch_jd = _epoch_to_jd(t.epoch_year, t.epoch_day)
     t.catalog_id = f"{t.norad_id:05d}"
 
@@ -253,16 +202,14 @@ def parse_tle_batch(text: str) -> list[TLE]:
     return tles
 
 
-
 def _epoch_to_jd(year: int, day_of_year: float) -> float:
     """Convert TLE epoch (year, fractional day) to Julian Date."""
-    # Jan 1 of the epoch year
     a = (14 - 1) // 12
     y = year + 4800 - a
     m = 1 + 12 * a - 3
     jd_jan1 = 1 + ((153 * m + 2) // 5) + 365 * y + (y // 4) - (y // 100) + (y // 400) - 32045
     jd_jan1 -= 0.5  # Julian Date convention (noon)
-    return jd_jan1 + day_of_year 
+    return jd_jan1 + day_of_year
 
 
 def tle_epoch_state(tle: TLE) -> tuple[NDArray, NDArray]:
@@ -275,7 +222,6 @@ def tle_epoch_state(tle: TLE) -> tuple[NDArray, NDArray]:
     r_eci : (3,) — position [m]
     v_eci : (3,) — velocity [m/s]
     """
-    # Solve Kepler's equation for true anomaly at epoch
     E = _solve_kepler(tle.mean_anomaly, tle.eccentricity)
     nu = 2.0 * np.arctan2(
         np.sqrt(1.0 + tle.eccentricity) * np.sin(E / 2.0),
@@ -285,6 +231,27 @@ def tle_epoch_state(tle: TLE) -> tuple[NDArray, NDArray]:
         tle.semi_major_axis, tle.eccentricity, tle.inclination,
         tle.raan, tle.argp, nu,
     )
+
+
+def _j2_secular_rates(n_rad_s: float, a: float, e: float, inc: float) -> tuple[float, float]:
+    """Compute J2 secular drift rates for RAAN and argument of perigee.
+
+    Parameters
+    ----------
+    n_rad_s : mean motion [rad/s]
+    a       : semi-major axis [m]
+    e       : eccentricity
+    inc     : inclination [rad]
+
+    Returns
+    -------
+    raan_dot, argp_dot : float — rates [rad/s]
+    """
+    p = a * (1.0 - e**2)
+    factor = -1.5 * n_rad_s * J2 * (R_EARTH / p) ** 2
+    cos_i = np.cos(inc)
+    sin_i = np.sin(inc)
+    return factor * cos_i, factor * (2.0 - 2.5 * sin_i**2)
 
 
 def propagate_tle(tle: TLE, jd: float) -> tuple[NDArray, NDArray]:
@@ -302,34 +269,21 @@ def propagate_tle(tle: TLE, jd: float) -> tuple[NDArray, NDArray]:
     """
     dt = (jd - tle.epoch_jd) * 86400.0  # seconds since epoch
 
-    a = tle.semi_major_axis
+    n_rad_s = tle.mean_motion * _REV_DAY_TO_RAD_S
     e = tle.eccentricity
     inc = tle.inclination
-    n = tle.mean_motion
-    p = a * (1.0 - e**2)
 
-    # J2 secular rates
-    cos_i = np.cos(inc)
-    sin_i = np.sin(inc)
-    factor = -1.5 * n * J2 * (R_EARTH / p) ** 2
+    raan_dot, argp_dot = _j2_secular_rates(n_rad_s, tle.semi_major_axis, e, inc)
 
-    raan_dot = factor * cos_i
-    argp_dot = factor * (2.0 - 2.5 * sin_i**2)
-
-    # Simple drag: mean motion increases, SMA decreases
-    # ndot is in rev/day² from TLE line 1
-    n_dot_rad_s2 = tle.ndot * 2.0 * np.pi / 86400.0**2
-    n_at_t = n + n_dot_rad_s2 * dt
+    # Simple drag: ndot in rev/day² → rad/s²
+    n_dot_rad_s2 = tle.ndot * _REV_DAY_TO_RAD_S / 86400.0
+    n_at_t = n_rad_s + n_dot_rad_s2 * dt
     a_at_t = (MU_EARTH / n_at_t**2) ** (1.0 / 3.0)
 
-    # Update angular elements
     raan_at_t = tle.raan + raan_dot * dt
     argp_at_t = tle.argp + argp_dot * dt
+    M_at_t = (tle.mean_anomaly + n_rad_s * dt + 0.5 * n_dot_rad_s2 * dt**2) % _TWO_PI
 
-    # Mean anomaly advance
-    M_at_t = (tle.mean_anomaly + n * dt + 0.5 * n_dot_rad_s2 * dt**2) % (2.0 * np.pi)
-
-    # Solve Kepler
     E = _solve_kepler(M_at_t, e)
     nu = 2.0 * np.arctan2(
         np.sqrt(1.0 + e) * np.sin(E / 2.0),
@@ -379,8 +333,7 @@ def verify_checksum(line: str) -> bool:
     """
     if len(line) < 69:
         return False
-    expected = int(line[68])
-    return tle_checksum(line) == expected
+    return tle_checksum(line) == int(line[68])
 
 
 def verify_tle(line1: str, line2: str) -> dict:
@@ -417,7 +370,6 @@ def verify_tle(line1: str, line2: str) -> dict:
     if not l2_ck:
         errors.append(f"line2 checksum: expected {tle_checksum(line2)}, got {line2[68] if len(line2) >= 69 else '?'}")
 
-    # NORAD ID match
     try:
         id1 = int(line1[2:7].strip())
         id2 = int(line2[2:7].strip())
@@ -456,16 +408,10 @@ def _format_exp_field(value: float) -> str:
     sign = '-' if value < 0 else ' '
     val = abs(value)
 
-    # Find exponent so that 0.1 <= mantissa < 1.0
-    exp = 0
-    mantissa = val
-    if mantissa != 0:
-        exp = int(np.floor(np.log10(mantissa))) + 1
-        mantissa = val / (10.0 ** exp)
+    exp = int(np.floor(np.log10(val))) + 1
+    mantissa = val / (10.0 ** exp)
 
-    # mantissa is now in [0.1, 1.0)
     digits = f"{mantissa:.5f}"[2:7]  # 5 digits after '0.'
-
     exp_sign = '+' if exp >= 0 else '-'
     return f"{sign}{digits}{exp_sign}{abs(exp)}"
 
@@ -483,65 +429,39 @@ def tle_to_lines(tle: TLE) -> tuple[str, str]:
     -------
     line1, line2 : str — TLE line 1 and line 2 (69 chars each)
     """
-    # ── Epoch ──
-    yr_2d = tle.epoch_year % 100
-    epoch_str = f"{yr_2d:02d}{tle.epoch_day:012.8f}"
+    epoch_str = f"{tle.epoch_year % 100:02d}{tle.epoch_day:012.8f}"
 
-    # ── ndot ──
-    # ndot is in rev/day², formatted as ±.NNNNNNNN (leading decimal assumed)
-    ndot_str = f"{tle.ndot:+011.8f}".replace("+", " ")
-    # TLE columns 34-43 (10 chars): " .NNNNNNNN" or "-.NNNNNNNN"
     if tle.ndot >= 0:
         ndot_field = f" {abs(tle.ndot):.8f}"[:10]
     else:
         ndot_field = f"{tle.ndot:.8f}"[:10]
 
-    # ── nddot and bstar: special exponent format ──
     nddot_field = _format_exp_field(tle.nddot)
     bstar_field = _format_exp_field(tle.bstar)
 
-    # ── International designator ──
-    intl = f"{tle.intl_designator:<8s}"
-
-    # ── Element set type (always 0 for SGP4) ──
-    etype = 0
-
-    # ── Element set number ──
-    elset = f"{tle.element_set:4d}"
-
-    # ── Build Line 1 (without checksum) ──
     line1_body = (
         f"1 {tle.norad_id:05d}{tle.classification} "
-        f"{intl} "
+        f"{tle.intl_designator:<8s} "
         f"{epoch_str} "
         f"{ndot_field} "
         f"{nddot_field} "
         f"{bstar_field} "
-        f"{etype}"
-        f"{elset}"
+        f"0"
+        f"{tle.element_set:4d}"
     )
-    # Pad or trim to exactly 68 characters
     line1_body = f"{line1_body:<68s}"[:68]
     line1 = line1_body + str(tle_checksum(line1_body))
 
-    # ── Line 2 ──
-    inc_deg = np.rad2deg(tle.inclination) % 360
-    raan_deg = np.rad2deg(tle.raan) % 360
-    argp_deg = np.rad2deg(tle.argp) % 360
-    ma_deg = np.rad2deg(tle.mean_anomaly) % 360
     ecc_str = f"{tle.eccentricity:.7f}"[2:]  # drop "0."
-    mm_rev_day = tle.mean_motion * 86400.0 / (2.0 * np.pi)
-    rev_num = tle.rev_number % 100000
-
     line2_body = (
         f"2 {tle.norad_id:05d} "
-        f"{inc_deg:8.4f} "
-        f"{raan_deg:8.4f} "
+        f"{np.rad2deg(tle.inclination) % 360:8.4f} "
+        f"{np.rad2deg(tle.raan) % 360:8.4f} "
         f"{ecc_str} "
-        f"{argp_deg:8.4f} "
-        f"{ma_deg:8.4f} "
-        f"{mm_rev_day:11.8f}"
-        f"{rev_num:5d}"
+        f"{np.rad2deg(tle.argp) % 360:8.4f} "
+        f"{np.rad2deg(tle.mean_anomaly) % 360:8.4f} "
+        f"{tle.mean_motion:11.8f}"
+        f"{tle.rev_number % 100000:5d}"
     )
     line2_body = f"{line2_body:<68s}"[:68]
     line2 = line2_body + str(tle_checksum(line2_body))
@@ -573,7 +493,6 @@ def tle_to_string(tle: TLE, include_name: bool = True) -> str:
 
 def _jd_to_epoch(jd: float) -> tuple[int, float]:
     """Convert Julian Date to TLE epoch (year, fractional day-of-year)."""
-    # Julian Date → calendar date (Meeus algorithm)
     z = int(jd + 0.5)
     f = (jd + 0.5) - z
     if z < 2299161:
@@ -590,8 +509,6 @@ def _jd_to_epoch(jd: float) -> tuple[int, float]:
     month = e - 1 if e < 14 else e - 13
     year = c - 4716 if month > 2 else c - 4715
 
-    # Day of year
-    # Jan 1 JD for this year
     jd_jan1 = _epoch_to_jd(year, 1.0)
     day_of_year = jd - jd_jan1 + 1.0
 
@@ -619,7 +536,6 @@ def update_epoch(tle: TLE, new_jd: float, propagate: bool = True) -> TLE:
     -------
     new_tle : TLE — updated copy
     """
-    import copy
     t = copy.deepcopy(tle)
 
     new_year, new_day = _jd_to_epoch(new_jd)
@@ -630,35 +546,26 @@ def update_epoch(tle: TLE, new_jd: float, propagate: bool = True) -> TLE:
     if propagate:
         dt = (new_jd - tle.epoch_jd) * 86400.0  # seconds
 
-        n = tle.mean_motion
+        n_rad_s = tle.mean_motion * _REV_DAY_TO_RAD_S
         e = tle.eccentricity
         a = tle.semi_major_axis
-        p = a * (1.0 - e**2)
 
-        # J2 secular rates
-        cos_i = np.cos(tle.inclination)
-        sin_i = np.sin(tle.inclination)
-        factor = -1.5 * n * J2 * (R_EARTH / p) ** 2
+        raan_dot, argp_dot = _j2_secular_rates(n_rad_s, a, e, tle.inclination)
 
-        raan_dot = factor * cos_i
-        argp_dot = factor * (2.0 - 2.5 * sin_i**2)
+        # ndot in rev/day² → rad/s²
+        n_dot_rad_s2 = tle.ndot * _REV_DAY_TO_RAD_S / 86400.0
 
-        # Drag: ndot in rev/day²
-        n_dot_rad_s2 = tle.ndot * 2.0 * np.pi / 86400.0**2
+        t.raan = (tle.raan + raan_dot * dt) % _TWO_PI
+        t.argp = (tle.argp + argp_dot * dt) % _TWO_PI
+        t.mean_anomaly = (tle.mean_anomaly + n_rad_s * dt
+                          + 0.5 * n_dot_rad_s2 * dt**2) % _TWO_PI
 
-        # Update elements
-        t.raan = (tle.raan + raan_dot * dt) % (2.0 * np.pi)
-        t.argp = (tle.argp + argp_dot * dt) % (2.0 * np.pi)
-        t.mean_anomaly = (tle.mean_anomaly + n * dt
-                          + 0.5 * n_dot_rad_s2 * dt**2) % (2.0 * np.pi)
+        n_at_t = n_rad_s + n_dot_rad_s2 * dt
+        t.mean_motion = n_at_t / _REV_DAY_TO_RAD_S
+        t.semi_major_axis = (MU_EARTH / n_at_t**2) ** (1.0 / 3.0)
 
-        # Updated mean motion (drag)
-        t.mean_motion = n + n_dot_rad_s2 * dt
-        t.semi_major_axis = (MU_EARTH / t.mean_motion**2) ** (1.0 / 3.0)
-        t.period = compute_orbital_period(t.semi_major_axis)
-
-        # Advance rev number by approximate number of orbits
-        revs = abs(dt) / tle.period
+        # period is in minutes; dt is in seconds
+        revs = abs(dt) / (tle.period * 60.0)
         if dt >= 0:
             t.rev_number = tle.rev_number + int(revs)
         else:
@@ -679,7 +586,6 @@ def update_mean_anomaly(tle: TLE, new_mean_anomaly: float) -> TLE:
     -------
     new_tle : TLE — copy with updated mean anomaly
     """
-    import copy
     t = copy.deepcopy(tle)
-    t.mean_anomaly = new_mean_anomaly % (2.0 * np.pi)
+    t.mean_anomaly = new_mean_anomaly % _TWO_PI
     return t

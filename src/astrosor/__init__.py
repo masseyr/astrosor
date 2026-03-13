@@ -51,6 +51,8 @@ from .exclusion import (
 from .tle import (
     TLE, parse_tle, parse_tle_batch, tle_epoch_state, propagate_tle,
 )
+from .vector import Vector3
+from .satellite import Satellite
 from .sensor import (
     GroundSensor, check_visibility, topocentric_azel,
     sun_elevation_at_sensor, estimate_visual_magnitude,
